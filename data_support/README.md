@@ -1,6 +1,6 @@
 # Dataset Preprocessing
 
-These scripts prepare lung ultrasound stills from Born POCUS, COVIDx-US, and Katumba for the capstone’s three-class classifier. The shared dataset uses `healthy`, `pneumonia`, and `covid` labels.
+These scripts prepare lung ultrasound stills and frames from Born POCUS, COVIDx-US, and Katumba for the capstone’s three-class classifier. The shared dataset uses `healthy`, `pneumonia`, and `covid` labels.
 
 | Script | What it does | Why we use it |
 |---|---|---|
@@ -16,7 +16,8 @@ These scripts prepare lung ultrasound stills from Born POCUS, COVIDx-US, and Kat
 | [`audit_katumba_overlap.py`](audit_katumba_overlap.py) | Checks staged stills against existing clean images and across Katumba groups using exact pixels and perceptual hashes. | Flags possible reused images and cross-group duplicates. |
 | [`resolve_katumba_duplicate.py`](resolve_katumba_duplicate.py) | Excludes the three exact duplicate copies from one Katumba COVID group in a resolved manifest. | Keeps the duplicated case under a single provisional group. |
 | [`review_katumba_overlap.py`](review_katumba_overlap.py) | Filters out pairs involving excluded stills and records the disposition of each remaining pair. | Clears cross-source perceptual similarities and identifies within-Katumba pairs for visual review. |
-| [`publish_katumba.py`](publish_katumba.py) | Records the reviewed decisions and publishes the retained stills and metadata. | Adds the reviewed Katumba batch to the shared export. |
+| [`publish_katumba.py`](publish_katumba.py) | Builds the reviewed Katumba subset for the capped baseline and applies the positive rapid-test filter. | Preserves the label decision and archives previously published COVID stills placed on hold. |
+| [`expand_dataset_frames.py`](expand_dataset_frames.py) | Decodes eligible media across all three sources and removes exact duplicates after normalization. | Builds the current export without a fixed frame cap. |
 
 ## Born POCUS pipeline
 
@@ -36,7 +37,7 @@ Writes the stills and `multi_view_manifest.csv` under `data/intermediate/born_po
 
 Reads the Born POCUS multi-view manifest and applies configured crops, converts the stills to 8-bit grayscale, and rescales them proportionally. It upscales or downscales as needed, then centers each image on a black 512 × 512 canvas. The fixed canvas gives model inputs a consistent shape. Native resolution, field of view, and physical scan depth can vary by source.
 
-The default run builds the Born POCUS clean export. Use `--pilot` to inspect a sample of before-and-after images. Use the default run as the base when rebuilding the published combined dataset. The optional `--include-covidx-drafts` mode serves draft review.
+The default run builds the Born POCUS clean export. Use `--pilot` to inspect a sample of before-and-after images. Use the default run when reconstructing the capped seed export from source inputs. The optional `--include-covidx-drafts` mode serves draft review.
 
 ## COVIDx-US pipeline
 
@@ -56,7 +57,7 @@ Use this script when revisiting the initial candidate review. The approved short
 
 Reads the shortlisted videos from `data/raw/covidx_us/videos/` and stages sample frames under `data/intermediate/covidx_us/shortlist/`. It applies a clip-specific crop where needed, including the crop that isolates a lung panel from the combined heart and lung views in clip `174`. It uses the same 512 × 512 normalization as Born POCUS. The `frames.csv` inventory records the class, patient group, source clip, frame index, and crop bounds. Two clips from one case can share a group, as with Kalafat clips `199` and `200`.
 
-After image and mask review, `--publish` reads the selected paths from `approved.csv`, enforces a maximum of three stills per group, and updates the COVIDx-US portion of the shared clean manifest. It expects the approved CSV to contain the full COVIDx-US selection intended for export. Keep optional source reuse references in its `reuse_evidence` column where available.
+After image and mask review, `--publish` reads the selected paths from `approved.csv`, enforces a maximum of three stills per group, and builds the Born POCUS and COVIDx-US seed manifest. Apply this step before publishing Katumba when reconstructing the seed export. It expects the approved CSV to contain the full COVIDx-US selection intended for export. Keep optional source reuse references in its `reuse_evidence` column where available.
 
 ### `mask_covidx_overlays.py`
 
@@ -66,7 +67,7 @@ Applies clip-specific polygon masks to the staged PNGs for scanner text, icons, 
 
 ### `build_katumba_manifest.py`
 
-Reads `data/raw/katumba/metadata.xlsx` and the processed images under `data/raw/katumba/dataset/`. It matches filenames to workbook rows, maps `Healthy Lung` to `healthy` and `Probably Covid` to `covid`, and flags out-of-scope labels and disagreements for exclusion from staging. It pools the original train, validation, and test folders by source patient ID and retains the original split for provenance. Writes `data/intermediate/katumba/intake_manifest.csv`.
+Reads `data/raw/katumba/metadata.xlsx` and the processed images under `data/raw/katumba/dataset/`. It matches filenames to workbook rows, maps `Healthy Lung` to `healthy` and records `Probably Covid` as a COVID candidate for downstream evidence review, and flags out-of-scope labels and disagreements for exclusion from staging. It pools the original train, validation, and test folders by source patient ID and retains the original split for provenance. Writes `data/intermediate/katumba/intake_manifest.csv`.
 
 ### `stage_katumba_stills.py`
 
@@ -86,11 +87,50 @@ Uses the resolved manifest to remove audit pairs involving excluded stills. Writ
 
 ### `publish_katumba.py`
 
-Checks the resolved manifest and overlap report against the reviewed batch, records the 44 decisions, and publishes 187 stills across 64 provisional groups. It adds or refreshes Katumba rows in the shared manifest and records the workbook label and original source split in `original_label` and `source_split`. Full-frame Katumba exports retain `needs_crop_review`. This publisher is tied to the reviewed release. Review any changed batch and update the publisher checks before publishing it.
+Checks the resolved staging manifest and overlap report for the reviewed baseline. It publishes 117 healthy stills from 40 groups and 11 COVID stills from four groups whose workbook symptom history explicitly reports a positive rapid diagnostic test. It moves 59 previously published COVID stills from 20 held groups out of the clean image directory and into `data/intermediate/katumba/label_hold/images/` when those files are present. The manifest retains the original workbook conclusion and source split. Test-to-scan timing remains under review.
+
+## Expanded export pipeline
+
+### `expand_dataset_frames.py`
+
+Reads the Born POCUS candidate inventory, the current clean manifest for the approved COVIDx-US shortlist and retained Katumba groups, and the Katumba intake manifest and workbook. It also needs the corresponding raw images, videos, and GIFs. It imports helpers and rules from `normalize_stills.py`, `mask_covidx_overlays.py`, and `build_katumba_manifest.py`.
+
+Decodes one candidate per eligible still image and every decodable frame from eligible videos and animated GIFs within applicable scan restrictions. It applies crops, masks, and 512 × 512 grayscale normalization before comparing pixels for exact duplicates across the export. The manifest retains one default still per group. Skipped frames and their retained matches are listed in `manifests/exact_duplicates.csv`.
+
+COVIDx-US clip `174_core_covid` contributes the previously approved frames at zero-based indices 38 and 57. Supply `--lung-range-174 FIRST LAST` only when a continuous lung-only range has been verified. Both endpoints are included. Newly extracted COVIDx-US frames are flagged `needs_frame_review`.
+
+| Source | Stills and frames | Provisional patient groups |
+|---|---:|---:|
+| Born POCUS | 20,033 | 109 |
+| COVIDx-US | 1,235 | 6 |
+| Katumba | 405 | 44 |
+| **Total** | **21,673** | **159** |
+
+Katumba contributes 362 healthy images and 43 COVID images. The published build skipped 20 exact normalized duplicates, all within patient groups.
 
 ## Rebuild the combined export
 
 Run from the repository root with pandas, NumPy, OpenCV, and Pillow installed and the original metadata and media in `data/raw/`.
+
+### Expand an existing combined export
+
+If the current clean manifest includes all three sources and the candidate inventories are present, run the expansion directly.
+
+```powershell
+python .\data_support\expand_dataset_frames.py
+```
+
+The preview writes to `data/intermediate/expanded_export/`. To build and publish a fresh expansion, run:
+
+```powershell
+python .\data_support\expand_dataset_frames.py --publish
+```
+
+Publication archives the previous `data/clean/` under `data/intermediate/` and prints the backup path. Use the same verified clip 174 range for both commands if you supply one.
+
+### Reconstruct the reviewed seed export
+
+Use the following sequence when starting from the original source inputs and saved approvals.
 
 ```powershell
 python .\data_support\build_recording_manifest.py
@@ -118,7 +158,7 @@ python .\data_support\review_katumba_overlap.py
 python .\data_support\publish_katumba.py
 ```
 
-The completed export contains 471 stills across 179 provisional patient groups.
+The reviewed seed export contains 412 stills across 159 provisional patient groups. Run the expansion command above to publish the full frame export.
 
 Run the overlap audit again when the source inventory changes. Keep raw media and working files locally under `data/raw/` and `data/intermediate/`. The combined export lives in `data/clean/images/` and `data/clean/manifests/normalization_manifest.csv`.
 
@@ -128,4 +168,4 @@ Run the overlap audit again when the source inventory changes. Keep raw media an
 > **Split by patient group.** Use `group_id` to keep all views of the same provisional patient group together in one train, validation, or test split. Generate project splits from `group_id` and use `source_split` for Katumba provenance. Load images using `normalized_path` relative to the repository root.
 
 > [!CAUTION]
-> **Count patient groups when reporting cohort size.** A group can contribute one to three stills. Use `is_default` for a one-still-per-group baseline.
+> **Count patient groups when reporting cohort size.** The expanded export has no fixed frame cap per group. Use `is_default` for a one-still-per-group baseline.
