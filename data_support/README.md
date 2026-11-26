@@ -1,16 +1,22 @@
 # Dataset Preprocessing
 
-These scripts prepare lung ultrasound stills from Born POCUS and COVIDx-US for the capstone’s three-class classifier. The shared dataset uses `healthy`, `pneumonia`, and `covid` labels.
+These scripts prepare lung ultrasound stills from Born POCUS, COVIDx-US, and Katumba for the capstone’s three-class classifier. The shared dataset uses `healthy`, `pneumonia`, and `covid` labels.
 
 | Script | What it does | Why we use it |
 |---|---|---|
 | [`build_recording_manifest.py`](build_recording_manifest.py) | Matches Born POCUS metadata to local media and writes the recording and candidate CSVs. | Establishes which recordings and provisional patient groups can enter extraction. |
 | [`extract_baseline_stills.py`](extract_baseline_stills.py) | Selects up to three stills per Born POCUS patient group and writes the multi-view manifest. | Retains different views while supporting a reproducible one-still baseline. |
-| [`normalize_stills.py`](normalize_stills.py) | Converts Born POCUS stills to 512 × 512 grayscale PNGs and creates the shared clean manifest. | Gives both datasets a consistent image format and loading path. |
+| [`normalize_stills.py`](normalize_stills.py) | Converts Born POCUS stills to 512 × 512 grayscale PNGs and creates the shared clean manifest. | Establishes the shared image format and loading path. |
 | [`audit_covidx_overlap.py`](audit_covidx_overlap.py) | Compares COVIDx-US metadata with the Born POCUS recording inventory and writes one audit CSV per target class. | Flags shared provenance and label conflicts before new clips enter the pipeline. |
 | [`extract_covidx_stills.py`](extract_covidx_stills.py) | Samples draft frames from the initial COVIDx-US pneumonia review clips. | Supports visual and duplicate review of candidate recordings. |
 | [`integrate_covidx_shortlist.py`](integrate_covidx_shortlist.py) | Stages normalized frames from shortlisted COVIDx-US clips. With `--publish`, adds the reviewed selections to the shared export. | Keeps the review batch separate from the selected dataset and preserves patient grouping. |
 | [`mask_covidx_overlays.py`](mask_covidx_overlays.py) | Generates masking previews and, with `--apply`, updates the staged manifest to point to masked images. | Reduces visible scanner and source cues that a model might learn. |
+| [`build_katumba_manifest.py`](build_katumba_manifest.py) | Matches processed images across the source splits to the workbook and writes the intake manifest. | Maps labels and assigns one stable group ID per source patient. |
+| [`stage_katumba_stills.py`](stage_katumba_stills.py) | Selects up to three distinct stills per group and stages 512 × 512 grayscale PNGs. | Prepares a reproducible review batch with one default still per group. |
+| [`audit_katumba_overlap.py`](audit_katumba_overlap.py) | Checks staged stills against existing clean images and across Katumba groups using exact pixels and perceptual hashes. | Flags possible reused images and cross-group duplicates. |
+| [`resolve_katumba_duplicate.py`](resolve_katumba_duplicate.py) | Excludes the three exact duplicate copies from one Katumba COVID group in a resolved manifest. | Keeps the duplicated case under a single provisional group. |
+| [`review_katumba_overlap.py`](review_katumba_overlap.py) | Filters out pairs involving excluded stills and records the disposition of each remaining pair. | Clears cross-source perceptual similarities and identifies within-Katumba pairs for visual review. |
+| [`publish_katumba.py`](publish_katumba.py) | Records the reviewed decisions and publishes the retained stills and metadata. | Adds the reviewed Katumba batch to the shared export. |
 
 ## Born POCUS pipeline
 
@@ -56,9 +62,35 @@ After image and mask review, `--publish` reads the selected paths from `approved
 
 Applies clip-specific polygon masks to the staged PNGs for scanner text, icons, depth markings, and watermarks. It generates side-by-side previews under `data/intermediate/covidx_us/shortlist/overlay_masks/previews/` so we can check the overlay and the scan edge together. With `--apply`, it points `frames.csv` to the masked copies and records the mask polygons in output-pixel coordinates. Use those paths in `approved.csv`.
 
+## Katumba pipeline
+
+### `build_katumba_manifest.py`
+
+Reads `data/raw/katumba/metadata.xlsx` and the processed images under `data/raw/katumba/dataset/`. It matches filenames to workbook rows, maps `Healthy Lung` to `healthy` and `Probably Covid` to `covid`, and flags out-of-scope labels and disagreements for exclusion from staging. It pools the original train, validation, and test folders by source patient ID and retains the original split for provenance. Writes `data/intermediate/katumba/intake_manifest.csv`.
+
+### `stage_katumba_stills.py`
+
+Reads the eligible intake rows, removes exact pixel duplicates within each group, and selects up to three stills spread across filename order. It designates one default still per group, converts the selected stills to grayscale, and resizes and pads them proportionally to 512 × 512. Writes PNGs and `staged_manifest.csv` under `data/intermediate/katumba/staged/`.
+
+### `audit_katumba_overlap.py`
+
+Compares staged images against the shared clean export and against images assigned to other Katumba groups. Exact pixel matches and perceptual hash similarities go to `data/intermediate/katumba/overlap_audit.csv`. Similarity flags are candidates for review. Patient grouping depends on source metadata and findings from the review.
+
+### `resolve_katumba_duplicate.py`
+
+Verifies the three one-to-one image matches between the two audited Katumba COVID groups. It retains the original train group and excludes its three validation copies from `staged/resolved_staged_manifest.csv`. The retained group can go into any subsequent project split.
+
+### `review_katumba_overlap.py`
+
+Uses the resolved manifest to remove audit pairs involving excluded stills. Writes `data/intermediate/katumba/overlap_review.csv` and reports which comparisons need review. In the published batch, 49 cross-source perceptual matches were auto-cleared based on separate cohort provenance, and all 44 pending within-Katumba image pairs were cleared after side-by-side review.
+
+### `publish_katumba.py`
+
+Checks the resolved manifest and overlap report against the reviewed batch, records the 44 decisions, and publishes 187 stills across 64 provisional groups. It adds or refreshes Katumba rows in the shared manifest and records the workbook label and original source split in `original_label` and `source_split`. Full-frame Katumba exports retain `needs_crop_review`. This publisher is tied to the reviewed release. Review any changed batch and update the publisher checks before publishing it.
+
 ## Rebuild the combined export
 
-Run from the repository root with pandas, NumPy, and OpenCV installed and the original metadata and media in `data/raw/`.
+Run from the repository root with pandas, NumPy, OpenCV, and Pillow installed and the original metadata and media in `data/raw/`.
 
 ```powershell
 python .\data_support\build_recording_manifest.py
@@ -75,13 +107,25 @@ python .\data_support\mask_covidx_overlays.py --apply
 python .\data_support\integrate_covidx_shortlist.py --publish
 ```
 
+After publishing COVIDx-US, run the Katumba scripts in this order for the reviewed release.
+
+```powershell
+python .\data_support\build_katumba_manifest.py
+python .\data_support\stage_katumba_stills.py
+python .\data_support\audit_katumba_overlap.py
+python .\data_support\resolve_katumba_duplicate.py
+python .\data_support\review_katumba_overlap.py
+python .\data_support\publish_katumba.py
+```
+
+The completed export contains 471 stills across 179 provisional patient groups.
+
 Run the overlap audit again when the source inventory changes. Keep raw media and working files locally under `data/raw/` and `data/intermediate/`. The combined export lives in `data/clean/images/` and `data/clean/manifests/normalization_manifest.csv`.
 
 ## Important Notes for Training Models
 
 > [!IMPORTANT]
-> **Split by patient group.** Use `group_id` to keep all views of the same provisional patient group together in one train, validation, or test split. Load images using `normalized_path` relative to the repository root.
+> **Split by patient group.** Use `group_id` to keep all views of the same provisional patient group together in one train, validation, or test split. Generate project splits from `group_id` and use `source_split` for Katumba provenance. Load images using `normalized_path` relative to the repository root.
 
 > [!CAUTION]
 > **Count patient groups when reporting cohort size.** A group can contribute one to three stills. Use `is_default` for a one-still-per-group baseline.
-

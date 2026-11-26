@@ -12,19 +12,20 @@ Each included patient group contributes up to three stills, with one designated 
 
 The combined dataset has the following structure: 
 
-| Class | Born POCUS patient groups | COVIDx-US patient groups | Total patient groups | Born POCUS stills | COVIDx-US stills | Total stills |
-|---|---:|---:|---:|---:|---:|---:|
-| Healthy | 41 | 1 | 42 | 103 | 1 | 104 |
-| Pneumonia | 52 | 3 | 55 | 128 | 4 | 132 |
-| COVID-19 | 16 | 2 | 18 | 44 | 4 | 48 |
-| **Total** | **109** | **6** | **115** | **275** | **9** | **284** |
+| Class | Born POCUS patient groups | COVIDx-US patient groups | Katumba patient groups | Total patient groups | Born POCUS stills | COVIDx-US stills | Katumba stills | Total stills |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Healthy | 41 | 1 | 40 | 82 | 103 | 1 | 117 | 221 |
+| Pneumonia | 52 | 3 | 0 | 55 | 128 | 4 | 0 | 132 |
+| COVID-19 | 16 | 2 | 24 | 42 | 44 | 4 | 70 | 118 |
+| **Total** | **109** | **6** | **64** | **179** | **275** | **9** | **187** | **471** |
 
 Patient groups are provisional and are based on the available source patient or case identifiers. Each group can contribute up to three stills.
 
-It draws from the following datasets:
--BornPOCUS  
--COVIDxUS 
+It draws from the following datasets.
 
+- Born POCUS
+- COVIDx-US
+- [Katumba lung ultrasound dataset, version 2](https://data.mendeley.com/datasets/hb3p34ytvx/2)
 
 ### Born POCUS Dataset Summaries
 
@@ -72,6 +73,20 @@ The audit totals count source clips. Patient-group totals are reported for the i
 
 Clips that are on hold will be undergoing a manual review and source attributino, before being merged or rejected from the master dataset.  
 
+### Katumba Dataset Summary
+
+| Class | Eligible source images | Candidate patient groups | Published patient groups | Normalized stills |
+|---|---:|---:|---:|---:|
+| Healthy | 362 | 40 | 40 | 117 |
+| COVID-19 | 325 | 25 | 24 | 70 |
+| **Total** | **687** | **65** | **64** | **187** |
+
+The intake manifest indexed 1,062 source images. The source workbook labels determined eligibility. We mapped `Healthy Lung` to `healthy` and `Probably Covid` to `covid`. The other 375 images were outside the selected categories or had a folder label that disagreed with the workbook. This includes 13 images in the source COVID folder that the workbook marked as probably not COVID.
+
+Staging skipped 10 exact duplicates within patient groups and selected 190 stills. The overlap audit found three exact image pairs linking the same two Katumba COVID groups. We kept one copy of each still under a single provisional group. The visual review cleared the 44 remaining within-Katumba image pairs, and the audit found zero exact image matches with Born POCUS or COVIDx-US.
+
+We pooled Katumba’s original train, validation, and test sets by patient group. The manifest retains the original split for provenance. Generate project splits using `group_id` so all stills from each group stay together.
+
 ## Harmonized Image Standard
 
 We use a common output standard for lung ultrasound stills from all source datasets. This lets us add new recordings without changing how the training pipeline loads images, reads labels, or groups patient views.
@@ -105,14 +120,14 @@ See the [data support README](data_support/README.md) for what each script does,
 
 ### Normalization manifest
 
-[`data/clean/manifests/normalization_manifest.csv`](data/clean/manifests/normalization_manifest.csv) contains one row per exported still from Born POCUS or COVIDx-US. Load images using `normalized_path` relative to the repository root. Keep all rows sharing a `group_id` in the same train, validation, or test split. Some provenance fields are populated only where the source provides them.
+[`data/clean/manifests/normalization_manifest.csv`](data/clean/manifests/normalization_manifest.csv) contains one row per exported still from Born POCUS, COVIDx-US, or Katumba. Load images using `normalized_path` relative to the repository root. Keep all rows sharing a `group_id` in the same train, validation, or test split. Some provenance fields are populated only where the source provides them.
 
 | Column | Meaning |
 |---|---|
 | `group_id` | Provisional patient group ID. All stills assigned to the same group share this ID. |
 | `group_scope` | Basis of the grouping. `source_patient` uses source patient or case information. `clip_only`, if present in a draft export, groups frames by clip. |
 | `class` | Harmonized label. Values are `healthy`, `pneumonia`, or `covid`. |
-| `dataset` | Source dataset. Values are `born_pocus` or `covidx_us`. |
+| `dataset` | Source dataset. Values are `born_pocus`, `covidx_us`, and `katumba`. |
 | `still_number` | Still number within the group, from 1 to 3. |
 | `is_default` | `True` for the designated still to use in a one-image-per-group baseline. |
 | `source_id` | Identifier or name of the contributing source, depending on the dataset. |
@@ -131,7 +146,8 @@ See the [data support README](data_support/README.md) for what each script does,
 | `crop_x1`, `crop_y1` | Exclusive right and bottom edges of the retained region, in original-image pixels. |
 | `output_width`, `output_height` | Final canvas dimensions, including padding. Both are currently 512 pixels. |
 | `overlay_mask_polygons` | JSON-encoded polygon coordinates in output-image pixels. Populated where an overlay mask was applied. |
-| `status` | Stage or selection status. `review` is carried forward from still extraction, and `approved` identifies selected COVIDx-US export rows. |
+| `status` | Stage or selection status. `review` is carried forward from still extraction, and `approved` identifies selected COVIDx-US and Katumba export rows. |
 | `normalization_qc` | Review state. `review_crop` flags a configured crop for review, `needs_crop_review` flags a full-frame export for review, and `approved` records approval of the selected still. |
+| `original_label` | Original Katumba workbook label before harmonization. |
+| `source_split` | Original Katumba split for provenance. Generate project splits using `group_id`. |
 | `reuse_evidence` | Optional reference documenting reuse terms, where recorded. |
-
