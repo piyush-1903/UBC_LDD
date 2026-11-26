@@ -15,6 +15,15 @@ REVIEW = INTERMEDIATE / "overlap_review.csv"
 CLEAN = ROOT / "data/clean"
 MANIFEST = CLEAN / "manifests/normalization_manifest.csv"
 CANVAS = (512, 512)
+HELD_IMAGES = INTERMEDIATE / "label_hold" / "images"
+
+# Reviewed workbook symptom histories explicitly report a positive COVID RDT.
+COVID_RDT_EVIDENCE = {
+    "katumba_14eec5b52594640d1f6ddfdb11424c541b517d2ae6a5cc5dba1b9079305aed54": "timing unspecified",
+    "katumba_160eb79fe88ac6b1551f352052ba1dbac0bba22039d8d0bbf4d88c3d81e638d3": "two weeks before the recorded history",
+    "katumba_4d3bd5f0f61eea90c14dd8014f738aaefc50698f67ca23e22db3ed491028fccb": "two weeks before the recorded history",
+    "katumba_efcc56dcdbfbb57e2297ac4a170b26830f2f54e8c18df989b5dd8b2c096fbdde": "timing unspecified",
+}
 
 
 def read_csv(path):
@@ -126,8 +135,22 @@ def main():
         raise SystemExit("The shared normalization manifest is missing required columns.")
 
     fields = list(dict.fromkeys([*clean_fields, "original_label", "source_split"]))
+    covid_groups = {row["group_id"] for row in staged if row["class"] == "covid"}
+    if not COVID_RDT_EVIDENCE.keys() <= covid_groups:
+        raise SystemExit("A reviewed RDT-positive group is absent from the staged COVID rows.")
+    selected = [
+        row for row in staged
+        if row["class"] != "covid" or row["group_id"] in COVID_RDT_EVIDENCE
+    ]
+    held = [
+        row for row in staged
+        if row["class"] == "covid" and row["group_id"] not in COVID_RDT_EVIDENCE
+    ]
+    if len(held) != 59:
+        raise SystemExit("Unexpected number of Katumba COVID stills on hold.")
+
     publications = []
-    for row in staged:
+    for row in selected:
         staged_image = ROOT / row["staged_path"]
         raw_image = ROOT / row["source_path"]
         with Image.open(staged_image) as image:
@@ -168,6 +191,24 @@ def main():
             staged_image, destination, {field: record.get(field, "") for field in fields}
         ))
 
+    # Validate files before moving anything out of the shared image directory.
+    held_files = []
+    for row in held:
+        staged_image = ROOT / row["staged_path"]
+        clean_image = CLEAN / "images" / staged_image.name
+        relative_path = clean_image.relative_to(ROOT).as_posix()
+        if relative_path in existing_paths:
+            raise SystemExit(f"Held image path belongs to another dataset: {relative_path}")
+        if not clean_image.exists():
+            continue
+        image_bytes = clean_image.read_bytes()
+        if image_bytes != staged_image.read_bytes():
+            raise SystemExit(f"Held clean image differs from its staged copy: {clean_image}")
+        archived = HELD_IMAGES / clean_image.name
+        if archived.exists() and archived.read_bytes() != image_bytes:
+            raise SystemExit(f"Held image archive already contains different bytes: {archived}")
+        held_files.append((clean_image, archived))
+
     (CLEAN / "images").mkdir(exist_ok=True)
     for source, destination, _ in publications:
         if destination.exists():
@@ -184,8 +225,15 @@ def main():
     write_csv(REVIEW, review_fields, review)
     write_csv(MANIFEST, fields, combined)
 
-    print("Cleared 44 within-Katumba image pairs.")
-    print(f"Published {len(publications)} Katumba stills across {len(groups)} groups.")
+    # Update the manifest first so a failed move can be retried without broken rows.
+    if held_files:
+        HELD_IMAGES.mkdir(parents=True, exist_ok=True)
+    for clean_image, archived in held_files:
+        os.replace(clean_image, archived)
+
+    print(f"Held {len(held)} Katumba COVID stills across {len(covid_groups) - len(COVID_RDT_EVIDENCE)} groups.")
+    print(f"Archived {len(held_files)} previously published images under {HELD_IMAGES.relative_to(ROOT)}.")
+    print(f"Published {len(publications)} Katumba stills across {sum(group_counts(selected).values())} groups.")
     print(f"Combined dataset: {len(combined)} stills across {sum(group_counts(combined).values())} groups.")
     print(f"Manifest: {MANIFEST.relative_to(ROOT)}")
 
