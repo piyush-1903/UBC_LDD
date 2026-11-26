@@ -11,9 +11,10 @@ REPO = Path(__file__).resolve().parents[1]
 DATA = REPO / "data"
 INTERMEDIATE = DATA / "intermediate"
 BORN = INTERMEDIATE / "born_pocus"
-CLEAN = DATA / "clean" / "born_pocus"
-CROP_RULES = REPO / "data_support" / "born_pocus_crops.json"
-SIZE = 224
+COVIDX = INTERMEDIATE / "covidx_us"
+CLEAN = DATA / "clean"
+RULES_DIR = REPO / "data_support"
+SIZE = 512
 
 
 def fit_to_canvas(image, size):
@@ -55,17 +56,54 @@ def write_png(path, image):
         raise OSError(f"Could not write {path}")
 
 
+def load_covidx_stills():
+    drafts = pd.read_csv(
+        COVIDX / "draft_stills_manifest.csv", dtype=str, keep_default_na=False
+    )
+    metadata = pd.read_csv(
+        DATA / "raw/covidx_us/video_metadata.csv",
+        encoding="cp1252",
+        dtype=str,
+        keep_default_na=False,
+    )
+    drafts = drafts.loc[drafts["status"].eq("review")].merge(
+        metadata[["id", "probe"]], left_on="clip_id", right_on="id",
+        validate="many_to_one", how="left", indicator=True,
+    )
+    if drafts["_merge"].ne("both").any():
+        raise SystemExit("Some COVIDx-US stills have no matching metadata.")
+    drafts = drafts.drop(columns=["_merge", "id"])
+    has_patient = drafts["source_patient_id"].str.strip().ne("")
+    patient_key = drafts["source"].str.casefold() + "_" + drafts["source_patient_id"]
+    drafts["group_id"] = ("covidx_us_" + patient_key).where(
+        has_patient, "covidx_us_clip_" + drafts["clip_id"]
+    )
+    drafts["group_scope"] = np.where(has_patient, "source_patient", "clip_only")
+    drafts["still_number"] = drafts.groupby("group_id").cumcount() + 1
+    drafts["is_default"] = drafts["still_number"].eq(1).map({True: "True", False: "False"})
+    drafts["additional_frame_from_same_clip"] = drafts.duplicated(["group_id", "clip_id"])
+    drafts["source_id"] = drafts.pop("source")
+    drafts["origin"] = "video_frame"
+    drafts["dataset"] = "covidx_us"
+    return drafts
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pilot", action="store_true", help="Process 12 sample stills and save previews.")
+    parser.add_argument(
+        "--include-covidx-drafts", action="store_true",
+        help="Include COVIDx-US review stills in the combined draft export.",
+    )
     args = parser.parse_args()
 
     manifest = pd.read_csv(
         BORN / "multi_view_manifest.csv", dtype=str, keep_default_na=False
     )
-    candidates = pd.read_csv(
-        INTERMEDIATE / "baseline_candidates.csv", dtype=str, keep_default_na=False
-    )
+    candidates_path = BORN / "baseline_candidates.csv"
+    if not candidates_path.is_file():
+        candidates_path = INTERMEDIATE / "baseline_candidates.csv"
+    candidates = pd.read_csv(candidates_path, dtype=str, keep_default_na=False)
     provenance = candidates[["relative_path", "source_id", "probe"]].drop_duplicates()
     images = manifest.loc[manifest["status"].eq("review")].merge(
         provenance,
@@ -80,12 +118,35 @@ def main():
     if images["_merge"].ne("both").any():
         raise SystemExit("Some stills have no matching source in baseline_candidates.csv.")
 
-    rules = {}
-    if CROP_RULES.exists():
-        rules = json.loads(CROP_RULES.read_text(encoding="utf-8"))
+    images = images.drop(columns=["_merge", "relative_path"])
+    images["dataset"] = "born_pocus"
+    images["group_scope"] = "source_patient"
+    if args.include_covidx_drafts:
+        images = pd.concat([images, load_covidx_stills()], ignore_index=True).fillna("")
 
-    selected = choose_pilot(images) if args.pilot else images
-    output = BORN / "normalization_pilot" if args.pilot else CLEAN
+    rules = {}
+    for dataset in images["dataset"].unique():
+        path = RULES_DIR / f"{dataset}_crops.json"
+        rules[dataset] = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
+
+    if args.pilot:
+        selected = choose_pilot(images.loc[images["dataset"].eq("born_pocus")])
+        if args.include_covidx_drafts:
+            covidx = images.loc[
+                images["dataset"].eq("covidx_us") & images["is_default"].eq("True")
+            ]
+            selected = pd.concat([selected, covidx], ignore_index=True)
+    else:
+        selected = images
+
+    output = INTERMEDIATE / "normalization_pilot" if args.pilot else CLEAN
+    filenames = [
+        Path(path).name if dataset == "born_pocus" else f"covidx_us_{Path(path).name}"
+        for dataset, path in zip(selected["dataset"], selected["image_path"])
+    ]
+    if len({name.casefold() for name in filenames}) != len(filenames):
+        raise SystemExit("Multiple input stills map to the same output filename.")
+    selected = selected.assign(output_filename=filenames)
     png_dir = output / "images"
     png_dir.mkdir(parents=True, exist_ok=True)
     preview_dir = output / "previews"
@@ -101,7 +162,7 @@ def main():
             raise OSError(f"Could not read {path}")
 
         height, width = original.shape[:2]
-        crop = rules.get(row["source_path"])
+        crop = rules[row["dataset"]].get(row["source_path"])
         x0, y0, x1, y1 = crop if crop is not None else (0, 0, width, height)
 
         if not (0 <= x0 < x1 <= width and 0 <= y0 < y1 <= height):
@@ -111,20 +172,18 @@ def main():
 
         grayscale = cv2.cvtColor(original[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
         normalized = fit_to_canvas(grayscale, SIZE)
-        normalized_path = png_dir / path.name
+        filename = row.pop("output_filename")
+        normalized_path = png_dir / filename
         write_png(normalized_path, normalized)
 
         if args.pilot:
             before = fit_to_canvas(original, SIZE)
             after = cv2.cvtColor(normalized, cv2.COLOR_GRAY2BGR)
             preview = np.hstack([before, after])
-            write_png(preview_dir / path.name, preview)
+            write_png(preview_dir / filename, preview)
 
-        row.pop("_merge")
-        row.pop("relative_path")
         results.append({
             **row,
-            "dataset": "born_pocus",
             "original_width": width,
             "original_height": height,
             "crop_x0": x0,
@@ -137,7 +196,9 @@ def main():
             "normalization_qc": "review_crop" if crop is not None else "needs_crop_review",
         })
 
-    pd.DataFrame(results).to_csv(output / "normalization_manifest.csv", index=False)
+    manifest_dir = output / "manifests"
+    manifest_dir.mkdir(exist_ok=True)
+    pd.DataFrame(results).to_csv(manifest_dir / "normalization_manifest.csv", index=False)
     print(f"Processed {len(results)} stills. Output: {output.relative_to(REPO)}")
 
 
